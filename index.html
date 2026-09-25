@@ -478,6 +478,24 @@ const SYSTEM_PROMPT = [
   "• Если не знаешь точного ответа — честно скажи об этом, не выдумывай факты."
 ].join("\n");
 
+/* СЖАТАЯ подсказка — только для запасного входа (GET), где текст уходит прямо
+   в адрес запроса. Полная подсказка туда НЕ влезает: адрес получается ~19 000
+   знаков, сервис отвечает ошибкой без заголовка CORS, и браузер отрезает запрос
+   («blocked by CORS policy»). Именно из-за этого ИИ выглядел сломанным.
+   Здесь оставлено самое важное: кто отвечает, что собеседник — не автор, кто
+   автор, что было в презентации и формулы 7 класса.
+   Адрес с этой подсказкой — около 5 000 знаков, это безопасно (предел ~12 000). */
+const SYSTEM_PROMPT_SHORT = [
+  "Ты — помощник по проекту «Известные физики»: презентация и доклад по физике, 7 класс.",
+  "Отвечай по-русски, коротко (2–4 предложения), простыми словами, без звёздочек.",
+  "Тот, кто спрашивает, — НЕ автор проекта: не зови его Костей и не говори «твоя презентация».",
+  "Автор проекта: Кабанов Константин (Костя), 7-9 класс, школа № 81, город Ярославль, Россия.",
+  "В презентации 16 слайдов: Архимед, Галилей, Гук, Паскаль, Ломоносов, Эйнштейн и подробно Ньютон",
+  "(1643–1727; три закона движения, закон всемирного тяготения, «Начала», разложение света, телескоп).",
+  "Формулы 7 класса: F = m·g (g ≈ 9,8 Н/кг), F = k·x, p = F/S, F = ρ·g·V.",
+  "Единицы: ньютон, килограмм, паскаль, джоуль, ватт."
+].join("\n");
+
 /* ============================================================
    3. СОСТОЯНИЕ (объявлено ДО вызовов!)
    ============================================================ */
@@ -514,7 +532,16 @@ const FREE_MODELS = ["openai", "openai-fast"];
 const FREE_MODEL = FREE_MODELS[0];
 /* Служебный текст сервиса — это НЕ ответ: и «нет кредитов», и «очередь полна».
    Сервис пускает только один запрос на адрес зараз, поэтому повторяем с паузой. */
-const SERVICE_TEXT = /credits|top up|not enough|pollinations|api key|contact whoever|quests|enter\.pollinations|queue full|max: 1/i;
+/* Сервис отказывает по-разному, и лечится это ПО-РАЗНОМУ:
+   • «занято» (код 429, «Queue full for IP … max: 1») — очередь освободится,
+     поэтому повтор с паузой помогает;
+   • «нет кредитов / нужен ключ» — это отказ сервиса, пауза тут не поможет:
+     надо СРАЗУ пробовать другой вход (запасной GET отвечает даже тогда,
+     когда POST отказал). Иначе сайт молчит по 30 секунд впустую.
+   SERVICE_TEXT — общий признак «это не ответ, а служебное сообщение». */
+const BUSY_TEXT = /queue full|max: 1|rate limit|too many requests|try again later/i;
+const DEAD_TEXT = /credits|top up|not enough|pollinations|api key|contact whoever|quests|enter\.pollinations/i;
+const SERVICE_TEXT = new RegExp(BUSY_TEXT.source + "|" + DEAD_TEXT.source, "i");
 /* режим по умолчанию: если у человека уже есть ключ — он важнее бесплатного ИИ */
 const DEFAULT_MODE = "free";
 
@@ -626,15 +653,27 @@ async function withTimeout(p, ms){
 }
 
 async function askFreeAI(text, onProgress){
-  /* Бесплатный сервис отвечает по-разному: иногда ошибкой HTTP, иногда кодом 200
-     и служебным текстом «нет кредитов». Главная причина отказов — СЛИШКОМ ЧАСТЫЕ
-     запросы: сервис ограничивает скорость. Поэтому пробуем несколько кругов
-     с паузой между ними — на практике это вытаскивает почти все отказы.
-     В каждом круге три попытки: две через POST и одна через запасной GET —
-     GET отвечает даже тогда, когда POST пишет «нет кредитов». */
+  /* Бесплатный сервис капризный, и причин отказа ровно две — обе найдены опытом
+     25.09.2026:
+
+     1) ОЧЕРЕДЬ. Сервис пускает по одному запросу с одного адреса. Если спросить
+        дважды подряд, второй получает 429 и текст «Queue full for IP … max: 1».
+        Поэтому между попытками надо ДАВАТЬ ПАУЗУ, а не долбить сразу.
+
+     2) ДЛИНА АДРЕСА у запасного входа. Там подсказка передаётся прямо в адресе
+        запроса. Полная подсказка (3 590 знаков кириллицы) превращается в адрес
+        на 18 924 знака — это больше, чем пускает сервис (~12 000). В ответ
+        приходит ошибка БЕЗ заголовка CORS, и браузер вообще не пропускает
+        запрос: в консоли «blocked by CORS policy». Именно поэтому ИИ выглядел
+        сломанным, хотя сам сервис работал.
+        => для запасного входа берём СЖАТУЮ подсказку (SYSTEM_PROMPT_SHORT).
+
+     Порядок попыток: полноценный POST (в нём уходит вся подсказка) → запасной
+     GET (он выручает, когда POST занят) → ещё круг. Всё в пределах BUDGET. */
   let lastErr = new Error("бесплатный ИИ недоступен");
   const tries = [
     { model:"openai",      viaGet:false },
+    { model:"openai",      viaGet:true  },
     { model:"openai-fast", viaGet:false },
     { model:"openai",      viaGet:true  }
   ];
@@ -643,50 +682,60 @@ async function askFreeAI(text, onProgress){
   const started = Date.now();
   const BUDGET = 45000;
   let attempt = 0;
-  for (let round = 1; round <= 3; round++){
-    for (const t of tries){
-      if (Date.now() - started > BUDGET){ lastErr = new Error("время ожидания вышло"); break; }
-      attempt++;
-      if (attempt > 1 && onProgress) onProgress(attempt);
-      try {
-        return await withTimeout(async (signal) => {
-          let out = "";
-          if (t.viaGet){
-            /* В GET системную подсказку передаём отдельным параметром system,
-               а ответ приходит простым текстом, не JSON. */
-            const r = await fetch(FREE_GET + encodeURIComponent(text)
-              + "?model=" + encodeURIComponent(t.model)
-              + "&system=" + encodeURIComponent(SYSTEM_PROMPT), { signal });
-            if (!r.ok) throw new Error("HTTP " + r.status);
-            out = (await r.text()).trim();
-          } else {
-            const r = await fetch(FREE_URL, {
-              method:"POST",
-              headers:{ "Content-Type":"application/json" },
-              signal,
-              body: JSON.stringify({
-                model: t.model,
-                messages: [{ role:"system", content: SYSTEM_PROMPT }, ...chatMessages(text)],
-                temperature: 0.6,
-                referrer: "fizika-7klass"
-              })
-            });
-            if (!r.ok) throw new Error("HTTP " + r.status);
-            const j = await r.json();
-            out = (j.choices?.[0]?.message?.content || "").trim();
-          }
-          if (!out) throw new Error("пустой ответ");
-          /* ЛОВУШКА: бесплатный сервис умеет отвечать кодом 200 и присылать вместо
-             ответа служебное сообщение — например «на счету нет кредитов».
-             Раньше сайт показывал эту английскую ошибку как ответ ИИ.
-             Теперь распознаём её и уходим в запасной путь (база знаний). */
-          if (SERVICE_TEXT.test(out)) throw new Error("сервис недоступен");
-          return out;
-        }, 15000);
-      } catch (e){ lastErr = e; }
+  let busy = 0;
+  for (const t of tries){
+    if (Date.now() - started > BUDGET){ lastErr = new Error("время ожидания вышло"); break; }
+    attempt++;
+    if (attempt > 1 && onProgress) onProgress(attempt);
+    try {
+      return await withTimeout(async (signal) => {
+        let out = "";
+        if (t.viaGet){
+          /* Запасной вход: ответ приходит простым текстом, не JSON.
+             Подсказка — СЖАТАЯ, иначе адрес перерастёт предел сервиса и браузер
+             отрежет запрос по CORS (см. пояснение выше). */
+          const r = await fetch(FREE_GET + encodeURIComponent(text.slice(0, 400))
+            + "?model=" + encodeURIComponent(t.model)
+            + "&system=" + encodeURIComponent(SYSTEM_PROMPT_SHORT), { signal });
+          if (r.status === 429) throw new Error("занято");
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          out = (await r.text()).trim();
+        } else {
+          const r = await fetch(FREE_URL, {
+            method:"POST",
+            headers:{ "Content-Type":"application/json" },
+            signal,
+            body: JSON.stringify({
+              model: t.model,
+              messages: [{ role:"system", content: SYSTEM_PROMPT }, ...chatMessages(text)],
+              temperature: 0.6,
+              referrer: "fizika-7klass"
+            })
+          });
+          if (r.status === 429) throw new Error("занято");
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          const j = await r.json();
+          out = (j.choices?.[0]?.message?.content || "").trim();
+        }
+        if (!out) throw new Error("пустой ответ");
+        /* ЛОВУШКА: сервис умеет отвечать кодом 200 и присылать вместо ответа
+           служебное сообщение — «нет кредитов», «очередь занята». Раньше сайт
+           показывал эту английскую ошибку как ответ ИИ. Теперь распознаём её и
+           уходим в запасной путь. */
+        if (BUSY_TEXT.test(out)) throw new Error("занято");
+        if (DEAD_TEXT.test(out)) throw new Error("сервис отказал");
+        return out;
+      }, 15000);
+    } catch (e){
+      lastErr = e;
+      /* Долгая пауза нужна ТОЛЬКО когда очередь занята: тогда сервис просит
+         подождать. Отказ («нет кредитов») паузой не лечится — сразу идём к
+         следующему входу, иначе человек будет смотреть на точки 30 секунд. */
+      const busyNow = String(e.message) === "занято";
+      if (busyNow) busy++;
+      const wait = busyNow ? (2000 + busy * 1000) : 600;
+      if (Date.now() - started + wait < BUDGET) await new Promise(r => setTimeout(r, wait));
     }
-    if (Date.now() - started > BUDGET) break;
-    if (round < 3) await new Promise(r => setTimeout(r, round * 1200));
   }
   throw lastErr;
 }
@@ -828,6 +877,8 @@ async function send(text){
   typingSay(cfg.mode === "base" ? "Ищу в базе знаний…" : "Секунду, думаю…");
 
   let reply = null, src, usedFallback = false;
+  /* Засекаем время: в тексте отказа честно напишем, сколько ждали на самом деле. */
+  const askedAt = Date.now();
   try {
     if (cfg.mode === "base") throw new Error("base");
     reply = (cfg.mode === "key" && cfg.key)
@@ -846,7 +897,11 @@ async function send(text){
       reply = a.text; src = a.src; usedFallback = true;
       if (cfg.mode !== "base"){
         aiDown = true;
-        reply = "Бесплатный ИИ не ответил за 45 секунд — сервис перегружен. Отвечаю по базе знаний.\n\n"
+        /* Честно пишем, сколько ждали на самом деле: если сервис отказал сразу,
+           «ждал 45 секунд» было бы враньём. */
+        const secs = Math.round((Date.now() - askedAt) / 1000);
+        reply = "Бесплатный ИИ не ответил" + (secs >= 5 ? " (пробовал " + secs + " с)" : "")
+          + " — сервис сейчас занят или отказывает. Отвечаю по базе знаний.\n\n"
           + reply
           + "\n\nПопробуй спросить ещё раз через минуту — обычно получается.";
       }
