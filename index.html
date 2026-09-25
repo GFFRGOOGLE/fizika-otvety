@@ -310,14 +310,15 @@
 
     <label for="mode">Режим</label>
     <select id="mode">
-      <option value="free">🧠 Бесплатный ИИ (без ключа) — рекомендуется</option>
-      <option value="key">🔑 Свой API-ключ (Groq / OpenRouter / Gemini)</option>
+      <option value="key">🔑 Свой ключ (GitHub / Groq / OpenRouter / Gemini) — самый надёжный</option>
+      <option value="free">🧠 Бесплатный ИИ без ключа</option>
       <option value="base">📚 Только база знаний (без интернета)</option>
     </select>
 
     <div id="keyFields" style="display:none">
       <label for="prov">Сервис</label>
       <select id="prov">
+        <option value="github">GitHub Models — бесплатно, есть DeepSeek (github_pat_…)</option>
         <option value="groq">Groq — бесплатный, быстрый (gsk_…)</option>
         <option value="openrouter">OpenRouter — есть бесплатные модели (sk-or-…)</option>
         <option value="gemini">Google Gemini — бесплатный лимит (AIza…)</option>
@@ -337,7 +338,9 @@
     <div class="note">
       🔒 Ключ (если вставишь) хранится только в этом браузере и никуда не отправляется, кроме самого сервиса ИИ.
       В файл сайта он не записывается.<br><br>
-      Где взять ключ: <b>console.groq.com</b> · <b>openrouter.ai/keys</b> · <b>aistudio.google.com</b>
+      Где взять ключ:<br>
+      • <b>GitHub Models</b> — github.com/settings/personal-access-tokens (галочка <b>Models: read</b>). Аккаунт GitHub уже есть — это самый простой путь, и там работает DeepSeek.<br>
+      • <b>console.groq.com</b> · <b>openrouter.ai/keys</b> · <b>aistudio.google.com</b>
     </div>
   </div>
 </div>
@@ -458,18 +461,23 @@ let cat = "Все";
 let query = "";
 let history = [];
 let busy = false;
+let aiDown = false;   /* бесплатный ИИ не ответил — показываем это в индикаторе */
+let keyTookOver = false; /* бесплатный ИИ подвёл, но выручил свой ключ */
 let cfg = { mode:"free", provider:"groq", key:"", model:"" };
 
 const $ = id => document.getElementById(id);
 const CATS = ["Все", ...new Set(QA.map(x => x.c))];
 
 const PROVIDERS = {
+  github:     { name:"GitHub Models", url:"https://models.github.ai/inference/chat/completions", model:"deepseek/DeepSeek-V3-0324", style:"openai", hint:"github_pat_…" },
   groq:       { name:"Groq", url:"https://api.groq.com/openai/v1/chat/completions", model:"llama-3.3-70b-versatile", style:"openai", hint:"gsk_…" },
   openrouter: { name:"OpenRouter", url:"https://openrouter.ai/api/v1/chat/completions", model:"meta-llama/llama-3.3-70b-instruct:free", style:"openai", hint:"sk-or-…" },
   gemini:     { name:"Google Gemini", url:"https://generativelanguage.googleapis.com/v1beta/models/", model:"gemini-2.0-flash", style:"gemini", hint:"AIza…" }
 };
 const FREE_URL = "https://text.pollinations.ai/openai";
 const FREE_MODEL = "openai";
+/* режим по умолчанию: если у человека уже есть ключ — он важнее бесплатного ИИ */
+const DEFAULT_MODE = "free";
 
 /* ============================================================
    4. ПОИСК ПО БАЗЕ (IDF: редкие слова важнее)
@@ -593,10 +601,16 @@ async function askFreeAI(text){
     });
     if (!r.ok) throw new Error("HTTP " + r.status);
     const j = await r.json();
-    const out = j.choices?.[0]?.message?.content || "";
-    if (!out.trim()) throw new Error("пустой ответ");
-    return out.trim();
-  }, 40000);
+    const out = (j.choices?.[0]?.message?.content || "").trim();
+    if (!out) throw new Error("пустой ответ");
+    /* ЛОВУШКА: бесплатный сервис умеет отвечать кодом 200 и присылать вместо
+       ответа служебное сообщение — например «на счету нет кредитов».
+       Раньше сайт показывал эту английскую ошибку как ответ ИИ.
+       Теперь распознаём её и уходим в запасной путь (база знаний). */
+    if (/credits|top up|not enough|pollinations|api key|contact whoever/i.test(out))
+      throw new Error("сервис недоступен");
+    return out;
+  }, 25000);
 }
 
 async function askKeyAI(text){
@@ -712,28 +726,38 @@ async function send(text){
   $("ask").value = ""; autoGrow();
   typingOn();
 
-  let reply, src, usedFallback = false;
+  let reply = null, src, usedFallback = false;
   try {
     if (cfg.mode === "base") throw new Error("base");
     reply = (cfg.mode === "key" && cfg.key) ? await askKeyAI(text) : await askFreeAI(text);
   } catch (e){
-    const a = answerLocal(text);
-    reply = a.text; src = a.src; usedFallback = true;
-    if (cfg.mode !== "base"){
-      reply = "⚠ Не удалось связаться с ИИ (" + (e.message || e) + ").\nОтвечаю по базе знаний:\n\n" + reply;
+    /* Бесплатный ИИ подвёл. Если у человека уже есть свой ключ — не сдаёмся,
+       пробуем через него: это надёжнее любого бесплатного сервиса. */
+    if (cfg.mode === "free" && cfg.key){
+      try { reply = await askKeyAI(text); keyTookOver = true; } catch (e2){ reply = null; }
+    }
+    if (reply === null){
+      const a = answerLocal(text);
+      reply = a.text; src = a.src; usedFallback = true;
+      if (cfg.mode !== "base"){
+        aiDown = true;
+        reply = "Бесплатный ИИ сейчас недоступен — отвечаю по базе знаний.\n\n" + reply;
+      }
     }
   }
   typingOff();
   bubble("assistant", reply, src);
   history.push({ role:"assistant", text: reply });
   busy = false; $("send").disabled = false; $("ask").focus();
-  if (usedFallback) modeChip();
+  if (usedFallback || keyTookOver) modeChip();
 }
 
 function modeChip(){
   const c = $("modeChip"), t = $("modeTxt");
   if (cfg.mode === "base"){ c.className = "chip off"; t.textContent = "Отвечаю по базе знаний"; }
+  else if (keyTookOver){ c.className = "chip ai"; t.textContent = "ИИ: " + PROVIDERS[cfg.provider].name; }
   else if (cfg.mode === "key" && cfg.key){ c.className = "chip ai"; t.textContent = "ИИ: " + PROVIDERS[cfg.provider].name; }
+  else if (aiDown){ c.className = "chip off"; t.textContent = "ИИ недоступен — отвечаю по базе"; }
   else { c.className = "chip ai"; t.textContent = "ИИ отвечает (бесплатно)"; }
 }
 
@@ -878,6 +902,7 @@ $("sheet").onclick = e => { if (e.target === $("sheet")) $("sheet").classList.re
 $("saveCfg").onclick = () => {
   cfg = { mode: $("mode").value, provider: $("prov").value, key: $("key").value.trim(), model: $("mdl").value.trim() };
   try { localStorage.setItem("fizika_ai_cfg2", JSON.stringify(cfg)); } catch (e){}
+  aiDown = false; keyTookOver = false;   /* настройки сменились — начинаем с чистого листа */
   modeChip(); $("sheet").classList.remove("on");
   hideIntro();
   bubble("assistant", cfg.mode === "base"
@@ -910,6 +935,29 @@ loadCfg();
 renderBase();
 showIntro();
 $("ask").focus();
+
+/* Одна проверка бесплатного ИИ при открытии страницы.
+   Если сервис лежит (например, у него кончился лимит), индикатор честно скажет
+   «ИИ недоступен — отвечаю по базе», а не будет обещать ответ, которого не будет.
+   Проверка не блокирует страницу и ни при каких условиях её не ломает. */
+(function(){
+  if (cfg.mode !== "free") return;
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), 12000);
+  fetch(FREE_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal: c.signal,
+    body: JSON.stringify({ model: FREE_MODEL, messages: [{ role: "user", content: "привет" }] })
+  })
+    .then(r => r.json())
+    .then(j => {
+      const out = (j.choices?.[0]?.message?.content || "");
+      if (!out.trim() || /credits|top up|not enough|pollinations|api key|contact whoever/i.test(out)) aiDown = true;
+    })
+    .catch(() => { aiDown = true; })
+    .finally(() => { clearTimeout(t); if (cfg.mode === "free") modeChip(); });
+})();
 </script>
 
 <!-- ============================================================
