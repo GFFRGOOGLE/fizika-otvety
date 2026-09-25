@@ -305,8 +305,9 @@
 <div class="sheet" id="sheet">
   <div class="box">
     <h3>Настройки ИИ</h3>
-    <p class="hint">Сейчас <b>бесплатный ИИ без ключа</b> (сервис pollinations) часто отказывает: у него
-      кончился бесплатный лимит. Сайт это понимает и <b>сам отвечает по базе знаний</b> — без английских
+    <p class="hint">Сейчас <b>бесплатный ИИ без ключа</b> (сервис pollinations) работает не всегда: он пускает
+      только один запрос зараз и иногда отвечает «лимит исчерпан». Сайт это понимает: повторяет запрос,
+      пробует запасной вход и, если ничего не вышло, <b>сам отвечает по базе знаний</b> — без английских
       ошибок на экране. Чтобы ИИ отвечал всегда, вставь свой бесплатный ключ (GitHub Models — там есть DeepSeek).</p>
 
     <label for="mode">Режим</label>
@@ -476,10 +477,22 @@ const PROVIDERS = {
   gemini:     { name:"Google Gemini", url:"https://generativelanguage.googleapis.com/v1beta/models/", model:"gemini-2.0-flash", style:"gemini", hint:"AIza…" }
 };
 const FREE_URL = "https://text.pollinations.ai/openai";
+/* ЗАПАСНОЙ ВХОД (найден и проверен 25.09.2026).
+   У pollinations два разных входа, и ведут они себя ПО-РАЗНОМУ:
+     • POST /openai — часто отвечает кодом 200 и текстом «нет кредитов»;
+     • GET /<вопрос>?model=openai&system=… — в тот же момент отвечает нормально.
+   Проверено вживую: POST → «The account behind this API key doesn't have
+   enough credits», сразу за ним GET → «Вес тела — это сила тяжести, с которой
+   Земля притягивает тело к своему центру». Ответ приходит простым текстом,
+   не JSON. Поэтому GET держим как второй шанс, а не как украшение. */
+const FREE_GET = "https://text.pollinations.ai/";
 /* pollinations отдаёт модель под двумя именами. Держим оба: если одно
    перестанет работать, второе выручит. */
 const FREE_MODELS = ["openai", "openai-fast"];
 const FREE_MODEL = FREE_MODELS[0];
+/* Служебный текст сервиса — это НЕ ответ: и «нет кредитов», и «очередь полна».
+   Сервис пускает только один запрос на адрес зараз, поэтому повторяем с паузой. */
+const SERVICE_TEXT = /credits|top up|not enough|pollinations|api key|contact whoever|quests|enter\.pollinations|queue full|max: 1/i;
 /* режим по умолчанию: если у человека уже есть ключ — он важнее бесплатного ИИ */
 const DEFAULT_MODE = "free";
 
@@ -594,33 +607,50 @@ async function askFreeAI(text){
   /* Бесплатный сервис отвечает по-разному: иногда ошибкой HTTP, иногда кодом 200
      и служебным текстом «нет кредитов». Главная причина отказов — СЛИШКОМ ЧАСТЫЕ
      запросы: сервис ограничивает скорость. Поэтому пробуем несколько кругов
-     с паузой между ними — на практике это вытаскивает почти все отказы. */
+     с паузой между ними — на практике это вытаскивает почти все отказы.
+     В каждом круге три попытки: две через POST и одна через запасной GET —
+     GET отвечает даже тогда, когда POST пишет «нет кредитов». */
   let lastErr = new Error("бесплатный ИИ недоступен");
+  const tries = [
+    { model:"openai",      viaGet:false },
+    { model:"openai-fast", viaGet:false },
+    { model:"openai",      viaGet:true  }
+  ];
   for (let round = 1; round <= 3; round++){
-    for (const model of FREE_MODELS){
+    for (const t of tries){
       try {
         return await withTimeout(async (signal) => {
-          const r = await fetch(FREE_URL, {
-            method:"POST",
-            headers:{ "Content-Type":"application/json" },
-            signal,
-            body: JSON.stringify({
-              model,
-              messages: [{ role:"system", content: SYSTEM_PROMPT }, ...chatMessages(text)],
-              temperature: 0.6,
-              referrer: "fizika-7klass"
-            })
-          });
-          if (!r.ok) throw new Error("HTTP " + r.status);
-          const j = await r.json();
-          const out = (j.choices?.[0]?.message?.content || "").trim();
+          let out = "";
+          if (t.viaGet){
+            /* В GET системную подсказку передаём отдельным параметром system,
+               а ответ приходит простым текстом, не JSON. */
+            const r = await fetch(FREE_GET + encodeURIComponent(text)
+              + "?model=" + encodeURIComponent(t.model)
+              + "&system=" + encodeURIComponent(SYSTEM_PROMPT), { signal });
+            if (!r.ok) throw new Error("HTTP " + r.status);
+            out = (await r.text()).trim();
+          } else {
+            const r = await fetch(FREE_URL, {
+              method:"POST",
+              headers:{ "Content-Type":"application/json" },
+              signal,
+              body: JSON.stringify({
+                model: t.model,
+                messages: [{ role:"system", content: SYSTEM_PROMPT }, ...chatMessages(text)],
+                temperature: 0.6,
+                referrer: "fizika-7klass"
+              })
+            });
+            if (!r.ok) throw new Error("HTTP " + r.status);
+            const j = await r.json();
+            out = (j.choices?.[0]?.message?.content || "").trim();
+          }
           if (!out) throw new Error("пустой ответ");
           /* ЛОВУШКА: бесплатный сервис умеет отвечать кодом 200 и присылать вместо
              ответа служебное сообщение — например «на счету нет кредитов».
              Раньше сайт показывал эту английскую ошибку как ответ ИИ.
              Теперь распознаём её и уходим в запасной путь (база знаний). */
-          if (/credits|top up|not enough|pollinations|api key|contact whoever|quests|enter\.pollinations/i.test(out))
-            throw new Error("сервис недоступен");
+          if (SERVICE_TEXT.test(out)) throw new Error("сервис недоступен");
           return out;
         }, 15000);
       } catch (e){ lastErr = e; }
@@ -961,19 +991,27 @@ $("ask").focus();
   if (cfg.mode !== "free") return;
   const c = new AbortController();
   const t = setTimeout(() => c.abort(), 12000);
-  fetch(FREE_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    signal: c.signal,
-    body: JSON.stringify({ model: FREE_MODEL, messages: [{ role: "user", content: "привет" }] })
-  })
-    .then(r => r.json())
-    .then(j => {
+  /* Сначала обычный POST. Если он «упал» — не спешим объявлять ИИ мёртвым:
+     пробуем запасной GET, который часто работает, когда POST пишет «нет кредитов».
+     Только если и он не ответил, честно показываем «ИИ недоступен». */
+  (async function(){
+    try {
+      const r = await fetch(FREE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: c.signal,
+        body: JSON.stringify({ model: FREE_MODEL, messages: [{ role: "user", content: "привет" }] })
+      });
+      const j = await r.json();
       const out = (j.choices?.[0]?.message?.content || "");
-      if (!out.trim() || /credits|top up|not enough|pollinations|api key|contact whoever|quests|enter\.pollinations/i.test(out)) aiDown = true;
-    })
-    .catch(() => { aiDown = true; })
-    .finally(() => { clearTimeout(t); if (cfg.mode === "free") modeChip(); });
+      if (out.trim() && !SERVICE_TEXT.test(out)) return;   /* POST жив — проверять нечего */
+    } catch (e){ /* ниже попробуем GET */ }
+    try {
+      const r = await fetch(FREE_GET + encodeURIComponent("привет") + "?model=" + FREE_MODEL, { signal: c.signal });
+      const out = r.ok ? (await r.text()).trim() : "";
+      if (!out || SERVICE_TEXT.test(out)) aiDown = true;
+    } catch (e){ aiDown = true; }
+  })().finally(() => { clearTimeout(t); if (cfg.mode === "free") modeChip(); });
 })();
 </script>
 
