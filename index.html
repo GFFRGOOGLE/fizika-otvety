@@ -320,11 +320,12 @@
     <p class="hint">Сейчас <b>бесплатный ИИ без ключа</b> (сервис pollinations) работает не всегда: он пускает
       только один запрос зараз и иногда отвечает «лимит исчерпан». Сайт это понимает: повторяет запрос,
       пробует запасной вход и, если ничего не вышло, <b>сам отвечает по базе знаний</b> — без английских
-      ошибок на экране. Чтобы ИИ отвечал всегда, вставь свой бесплатный ключ (GitHub Models — там есть DeepSeek).</p>
+      ошибок на экране. Чтобы ИИ отвечал всегда, вставь свой бесплатный ключ — например OpenRouter:
+      у него есть модели с пометкой «:free», карта для них не нужна.</p>
 
     <label for="mode">Режим</label>
     <select id="mode">
-      <option value="key">🔑 Свой ключ (GitHub / Groq / OpenRouter / Gemini) — самый надёжный</option>
+      <option value="key">🔑 Свой ключ (OpenRouter / Groq / Gemini / DeepSeek) — самый надёжный</option>
       <option value="free">🧠 Бесплатный ИИ без ключа</option>
       <option value="base">📚 Только база знаний (без интернета)</option>
     </select>
@@ -332,10 +333,10 @@
     <div id="keyFields" style="display:none">
       <label for="prov">Сервис</label>
       <select id="prov">
-        <option value="github">GitHub Models — бесплатно, есть DeepSeek (github_pat_…)</option>
+        <option value="openrouter">OpenRouter — бесплатные модели (sk-or-…)</option>
         <option value="groq">Groq — бесплатный, быстрый (gsk_…)</option>
-        <option value="openrouter">OpenRouter — есть бесплатные модели (sk-or-…)</option>
         <option value="gemini">Google Gemini — бесплатный лимит (AIza…)</option>
+        <option value="deepseek">DeepSeek напрямую — платно, но дёшево (sk-…)</option>
       </select>
       <label for="key">API-ключ</label>
       <input id="key" type="password" placeholder="вставь ключ" autocomplete="off">
@@ -353,8 +354,12 @@
       🔒 Ключ (если вставишь) хранится только в этом браузере и никуда не отправляется, кроме самого сервиса ИИ.
       В файл сайта он не записывается.<br><br>
       Где взять ключ:<br>
-      • <b>GitHub Models</b> — github.com/settings/personal-access-tokens (галочка <b>Models: read</b>). Аккаунт GitHub уже есть — это самый простой путь, и там работает DeepSeek.<br>
-      • <b>console.groq.com</b> · <b>openrouter.ai/keys</b> · <b>aistudio.google.com</b>
+      • <b>OpenRouter</b> — openrouter.ai/keys. Карта не нужна: у моделей с пометкой «:free» цена 0.<br>
+      • <b>Groq</b> — console.groq.com/keys. Очень быстрый, есть бесплатный тариф.<br>
+      • <b>Google Gemini</b> — aistudio.google.com/apikey. Есть бесплатный лимит.<br>
+      • <b>DeepSeek</b> — platform.deepseek.com/api_keys. Это платно, но очень дёшево.<br>
+      <i>Список сверен 25.09.2026: GitHub Models закрыт 30.07.2026, старая модель Groq ушла
+      в платный тариф «Enterprise», а Gemini 2.0 отключён — поэтому варианты именно такие.</i>
     </div>
   </div>
 </div>
@@ -505,16 +510,21 @@ let history = [];
 let busy = false;
 let aiDown = false;   /* бесплатный ИИ не ответил — показываем это в индикаторе */
 let keyTookOver = false; /* бесплатный ИИ подвёл, но выручил свой ключ */
-let cfg = { mode:"free", provider:"groq", key:"", model:"" };
+let cfg = { mode:"free", provider:"openrouter", key:"", model:"" };
 
 const $ = id => document.getElementById(id);
 const CATS = ["Все", ...new Set(QA.map(x => x.c))];
 
 const PROVIDERS = {
-  github:     { name:"GitHub Models", url:"https://models.github.ai/inference/chat/completions", model:"deepseek/DeepSeek-V3-0324", style:"openai", hint:"github_pat_…" },
-  groq:       { name:"Groq", url:"https://api.groq.com/openai/v1/chat/completions", model:"llama-3.3-70b-versatile", style:"openai", hint:"gsk_…" },
-  openrouter: { name:"OpenRouter", url:"https://openrouter.ai/api/v1/chat/completions", model:"meta-llama/llama-3.3-70b-instruct:free", style:"openai", hint:"sk-or-…" },
-  gemini:     { name:"Google Gemini", url:"https://generativelanguage.googleapis.com/v1beta/models/", model:"gemini-2.0-flash", style:"gemini", hint:"AIza…" }
+  /* Список сверен 25.09.2026. ВАЖНО, иначе снова появятся «мёртвые» варианты:
+       • GitHub Models — ЗАКРЫТ 30.07.2026 (сервис отключён полностью);
+       • Groq llama-3.3-70b-versatile — ушёл в Enterprise, обычному человеку недоступен;
+       • gemini-2.0-flash — ОТКЛЮЧЁН производителем, актуальны gemini-3.8-flash и ниже.
+     У бесплатных моделей OpenRouter в имени есть «:free» — они действительно 0 ₽. */
+  openrouter: { name:"OpenRouter", url:"https://openrouter.ai/api/v1/chat/completions", model:"nvidia/nemotron-3-ultra-550b-a55b:free", style:"openai", hint:"sk-or-…" },
+  groq:       { name:"Groq", url:"https://api.groq.com/openai/v1/chat/completions", model:"openai/gpt-oss-120b", style:"openai", hint:"gsk_…" },
+  gemini:     { name:"Google Gemini", url:"https://generativelanguage.googleapis.com/v1beta/models/", model:"gemini-3.8-flash", style:"gemini", hint:"AIza…" },
+  deepseek:   { name:"DeepSeek (платно, дёшево)", url:"https://api.deepseek.com/chat/completions", model:"deepseek-flash", style:"openai", hint:"sk-…" }
 };
 const FREE_URL = "https://text.pollinations.ai/openai";
 /* ЗАПАСНОЙ ВХОД (найден и проверен 25.09.2026).
@@ -741,7 +751,9 @@ async function askFreeAI(text, onProgress){
 }
 
 async function askKeyAI(text){
-  const p = PROVIDERS[cfg.provider];
+  /* Если в настройках остался сервис, которого больше нет, не падаем —
+     берём живой. Иначе человек увидит молчание вместо ответа. */
+  const p = PROVIDERS[cfg.provider] || PROVIDERS.openrouter;
   const model = cfg.model || p.model;
   const msgs = chatMessages(text);
   return withTimeout(async (signal) => {
@@ -916,9 +928,10 @@ async function send(text){
 
 function modeChip(){
   const c = $("modeChip"), t = $("modeTxt");
+  const name = (PROVIDERS[cfg.provider] || PROVIDERS.openrouter).name;
   if (cfg.mode === "base"){ c.className = "chip off"; t.textContent = "Отвечаю по базе знаний"; }
-  else if (keyTookOver){ c.className = "chip ai"; t.textContent = "ИИ: " + PROVIDERS[cfg.provider].name; }
-  else if (cfg.mode === "key" && cfg.key){ c.className = "chip ai"; t.textContent = "ИИ: " + PROVIDERS[cfg.provider].name; }
+  else if (keyTookOver){ c.className = "chip ai"; t.textContent = "ИИ: " + name; }
+  else if (cfg.mode === "key" && cfg.key){ c.className = "chip ai"; t.textContent = "ИИ: " + name; }
   else if (aiDown){ c.className = "chip off"; t.textContent = "ИИ недоступен — отвечаю по базе"; }
   else { c.className = "chip ai"; t.textContent = "ИИ отвечает (бесплатно)"; }
 }
@@ -1048,6 +1061,13 @@ function loadCfg(){
     const raw = localStorage.getItem("fizika_ai_cfg2");
     if (raw) cfg = Object.assign(cfg, JSON.parse(raw));
   } catch (e){}
+  /* В браузере мог остаться сервис, которого больше нет (например GitHub Models,
+     закрытый 30.07.2026). Тогда список его не знает, и страница падала бы на пустом
+     месте — молча, без ответа. Поэтому подменяем на живой и говорим об этом. */
+  if (!PROVIDERS[cfg.provider]){
+    cfg.provider = "openrouter"; cfg.model = "";
+    try { localStorage.setItem("fizika_ai_cfg2", JSON.stringify(cfg)); } catch (e){}
+  }
   $("mode").value = cfg.mode;
   $("prov").value = cfg.provider;
   $("key").value = cfg.key;
