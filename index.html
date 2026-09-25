@@ -82,6 +82,10 @@
   .dots i{width:8px; height:8px; border-radius:50%; background:var(--cyan); animation:bl 1.1s infinite}
   .dots i:nth-child(2){animation-delay:.16s; background:var(--violet)}
   .dots i:nth-child(3){animation-delay:.32s; background:var(--pink)}
+  /* Пока идёт ожидание, рядом с точками пишем, что происходит. Иначе долгая
+     пауза выглядит как поломка — из-за этого и были жалобы «ИИ не работает». */
+  #typing .bub{display:flex; align-items:center; gap:11px}
+  .tstate{font-size:13.5px; opacity:.72; line-height:1.3}
   @keyframes bl{0%,60%,100%{opacity:.25; transform:translateY(0)} 30%{opacity:1; transform:translateY(-4px)}}
 
   /* ---------- стартовый экран ---------- */
@@ -611,7 +615,7 @@ async function withTimeout(p, ms){
   try { return await p(c.signal); } finally { clearTimeout(t); }
 }
 
-async function askFreeAI(text){
+async function askFreeAI(text, onProgress){
   /* Бесплатный сервис отвечает по-разному: иногда ошибкой HTTP, иногда кодом 200
      и служебным текстом «нет кредитов». Главная причина отказов — СЛИШКОМ ЧАСТЫЕ
      запросы: сервис ограничивает скорость. Поэтому пробуем несколько кругов
@@ -624,8 +628,16 @@ async function askFreeAI(text){
     { model:"openai-fast", viaGet:false },
     { model:"openai",      viaGet:true  }
   ];
+  /* Общий предел ожидания: дольше ждать нельзя — человек решит, что сайт завис.
+     Не успели за это время — честно отвечаем по базе и объясняем причину. */
+  const started = Date.now();
+  const BUDGET = 45000;
+  let attempt = 0;
   for (let round = 1; round <= 3; round++){
     for (const t of tries){
+      if (Date.now() - started > BUDGET){ lastErr = new Error("время ожидания вышло"); break; }
+      attempt++;
+      if (attempt > 1 && onProgress) onProgress(attempt);
       try {
         return await withTimeout(async (signal) => {
           let out = "";
@@ -663,7 +675,8 @@ async function askFreeAI(text){
         }, 15000);
       } catch (e){ lastErr = e; }
     }
-    if (round < 3) await new Promise(r => setTimeout(r, round * 1500));
+    if (Date.now() - started > BUDGET) break;
+    if (round < 3) await new Promise(r => setTimeout(r, round * 1200));
   }
   throw lastErr;
 }
@@ -746,11 +759,17 @@ function bubble(role, text, src){
 function typingOn(){
   const el = document.createElement("div");
   el.className = "msg ai"; el.id = "typing";
-  el.innerHTML = '<div class="av">AI</div><div class="bub"><span class="dots"><i></i><i></i><i></i></span></div>';
+  el.innerHTML = '<div class="av">AI</div><div class="bub">'
+    + '<span class="dots"><i></i><i></i><i></i></span>'
+    + '<span class="tstate" id="tstate">Секунду, думаю…</span></div>';
   $("chat").appendChild(el);
   $("chat").scrollTop = $("chat").scrollHeight;
 }
 function typingOff(){ const t = $("typing"); if (t) t.remove(); }
+
+/* Пока идёт ожидание, честно пишем, что делает сайт. Долгая пауза без слов
+   снаружи неотличима от поломки. */
+function typingSay(msg){ const t = $("tstate"); if (t) t.textContent = msg; }
 
 /* Подсказка под полем ввода. Нужна, чтобы у любого «ничего не произошло»
    была видимая причина: молчание кнопки снаружи неотличимо от поломки. */
@@ -796,11 +815,16 @@ async function send(text){
   history.push({ role:"user", text });
   $("ask").value = ""; autoGrow();
   typingOn();
+  typingSay(cfg.mode === "base" ? "Ищу в базе знаний…" : "Секунду, думаю…");
 
   let reply = null, src, usedFallback = false;
   try {
     if (cfg.mode === "base") throw new Error("base");
-    reply = (cfg.mode === "key" && cfg.key) ? await askKeyAI(text) : await askFreeAI(text);
+    reply = (cfg.mode === "key" && cfg.key)
+      ? await askKeyAI(text)
+      : await askFreeAI(text, (n) => typingSay(n === 2
+          ? "Сервис ответил не сразу — пробую ещё раз…"
+          : "Пробую другой способ… (попытка " + n + ")"));
   } catch (e){
     /* Бесплатный ИИ подвёл. Если у человека уже есть свой ключ — не сдаёмся,
        пробуем через него: это надёжнее любого бесплатного сервиса. */
@@ -812,7 +836,9 @@ async function send(text){
       reply = a.text; src = a.src; usedFallback = true;
       if (cfg.mode !== "base"){
         aiDown = true;
-        reply = "Бесплатный ИИ сейчас недоступен — отвечаю по базе знаний.\n\n" + reply;
+        reply = "Бесплатный ИИ не ответил за 45 секунд — сервис перегружен. Отвечаю по базе знаний.\n\n"
+          + reply
+          + "\n\nПопробуй спросить ещё раз через минуту — обычно получается.";
       }
     }
   }
