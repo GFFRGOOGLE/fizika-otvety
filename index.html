@@ -305,8 +305,9 @@
 <div class="sheet" id="sheet">
   <div class="box">
     <h3>Настройки ИИ</h3>
-    <p class="hint">По умолчанию работает <b>бесплатный ИИ без ключа</b> — он отвечает с промтом про твою презентацию.
-      Если он перегружен, можно вставить свой ключ или отвечать по базе знаний.</p>
+    <p class="hint">Сейчас <b>бесплатный ИИ без ключа</b> (сервис pollinations) часто отказывает: у него
+      кончился бесплатный лимит. Сайт это понимает и <b>сам отвечает по базе знаний</b> — без английских
+      ошибок на экране. Чтобы ИИ отвечал всегда, вставь свой бесплатный ключ (GitHub Models — там есть DeepSeek).</p>
 
     <label for="mode">Режим</label>
     <select id="mode">
@@ -475,7 +476,10 @@ const PROVIDERS = {
   gemini:     { name:"Google Gemini", url:"https://generativelanguage.googleapis.com/v1beta/models/", model:"gemini-2.0-flash", style:"gemini", hint:"AIza…" }
 };
 const FREE_URL = "https://text.pollinations.ai/openai";
-const FREE_MODEL = "openai";
+/* pollinations отдаёт модель под двумя именами. Держим оба: если одно
+   перестанет работать, второе выручит. */
+const FREE_MODELS = ["openai", "openai-fast"];
+const FREE_MODEL = FREE_MODELS[0];
 /* режим по умолчанию: если у человека уже есть ключ — он важнее бесплатного ИИ */
 const DEFAULT_MODE = "free";
 
@@ -587,30 +591,43 @@ async function withTimeout(p, ms){
 }
 
 async function askFreeAI(text){
-  return withTimeout(async (signal) => {
-    const r = await fetch(FREE_URL, {
-      method:"POST",
-      headers:{ "Content-Type":"application/json" },
-      signal,
-      body: JSON.stringify({
-        model: FREE_MODEL,
-        messages: [{ role:"system", content: SYSTEM_PROMPT }, ...chatMessages(text)],
-        temperature: 0.6,
-        referrer: "fizika-7klass"
-      })
-    });
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    const j = await r.json();
-    const out = (j.choices?.[0]?.message?.content || "").trim();
-    if (!out) throw new Error("пустой ответ");
-    /* ЛОВУШКА: бесплатный сервис умеет отвечать кодом 200 и присылать вместо
-       ответа служебное сообщение — например «на счету нет кредитов».
-       Раньше сайт показывал эту английскую ошибку как ответ ИИ.
-       Теперь распознаём её и уходим в запасной путь (база знаний). */
-    if (/credits|top up|not enough|pollinations|api key|contact whoever/i.test(out))
-      throw new Error("сервис недоступен");
-    return out;
-  }, 25000);
+  /* Бесплатный сервис отвечает по-разному: иногда ошибкой HTTP, иногда кодом 200
+     и служебным текстом «нет кредитов». Главная причина отказов — СЛИШКОМ ЧАСТЫЕ
+     запросы: сервис ограничивает скорость. Поэтому пробуем несколько кругов
+     с паузой между ними — на практике это вытаскивает почти все отказы. */
+  let lastErr = new Error("бесплатный ИИ недоступен");
+  for (let round = 1; round <= 3; round++){
+    for (const model of FREE_MODELS){
+      try {
+        return await withTimeout(async (signal) => {
+          const r = await fetch(FREE_URL, {
+            method:"POST",
+            headers:{ "Content-Type":"application/json" },
+            signal,
+            body: JSON.stringify({
+              model,
+              messages: [{ role:"system", content: SYSTEM_PROMPT }, ...chatMessages(text)],
+              temperature: 0.6,
+              referrer: "fizika-7klass"
+            })
+          });
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          const j = await r.json();
+          const out = (j.choices?.[0]?.message?.content || "").trim();
+          if (!out) throw new Error("пустой ответ");
+          /* ЛОВУШКА: бесплатный сервис умеет отвечать кодом 200 и присылать вместо
+             ответа служебное сообщение — например «на счету нет кредитов».
+             Раньше сайт показывал эту английскую ошибку как ответ ИИ.
+             Теперь распознаём её и уходим в запасной путь (база знаний). */
+          if (/credits|top up|not enough|pollinations|api key|contact whoever|quests|enter\.pollinations/i.test(out))
+            throw new Error("сервис недоступен");
+          return out;
+        }, 15000);
+      } catch (e){ lastErr = e; }
+    }
+    if (round < 3) await new Promise(r => setTimeout(r, round * 1500));
+  }
+  throw lastErr;
 }
 
 async function askKeyAI(text){
@@ -953,7 +970,7 @@ $("ask").focus();
     .then(r => r.json())
     .then(j => {
       const out = (j.choices?.[0]?.message?.content || "");
-      if (!out.trim() || /credits|top up|not enough|pollinations|api key|contact whoever/i.test(out)) aiDown = true;
+      if (!out.trim() || /credits|top up|not enough|pollinations|api key|contact whoever|quests|enter\.pollinations/i.test(out)) aiDown = true;
     })
     .catch(() => { aiDown = true; })
     .finally(() => { clearTimeout(t); if (cfg.mode === "free") modeChip(); });
